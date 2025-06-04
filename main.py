@@ -92,8 +92,7 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id in task["responses"]:
                 await update.message.reply_text("Вы уже откликнулись на это задание.")
                 return
-
-task["responses"].append(user_id)
+            task["responses"].append(user_id)
             await update.message.reply_text(f"Вы откликнулись на задание {task['title']}.")
             # Можно уведомить заказчика (автора задания)
             return
