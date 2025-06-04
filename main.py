@@ -1,144 +1,101 @@
 import os
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    ContextTypes, filters, MessageHandler
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters, ConversationHandler, CallbackQueryHandler
 )
 
-# Хранение данных (в реальной жизни - БД)
-orders = []  # каждый заказ: {id, author_id, description, price, executor_id, status}
-order_id_counter = 1
+# Получаем токен из переменной окружения
+TOKEN = os.getenv("BOT_TOKEN")
 
+# Этапы диалога
+ASK_ORDER, CONFIRM_ORDER = range(2)
+
+# Список заказов (в реальности будет база данных)
+orders = []
+
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я бот биржи проектов для студентов.\n\n"
-        "Команды:\n"
-        "/neworder - создать новый заказ\n"
-        "/orders - посмотреть доступные заказы\n"
-        "/myorders - мои заказы\n"
-        "/takeorder <id> - взять заказ в работу\n"
-        "/payorder <id> - подтвердить оплату заказа\n"
+        "Добро пожаловать в StuDO — студенческую биржу заданий!\n"
+        "Чтобы разместить заказ, напиши /order\n"
+        "Чтобы стать исполнителем, напиши /tasks"
     )
 
-async def neworder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ожидаем, что дальше пользователь пришлёт описание и цену в одном сообщении через |
+# Диалог размещения заказа
+async def order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Опиши, что тебе нужно сделать (чем подробнее, тем лучше):")
+    return ASK_ORDER
+
+async def receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["order_text"] = update.message.text
+    keyboard = [
+        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_order")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="cancel_order")]
+    ]
     await update.message.reply_text(
-        "Отправь заказ в формате:\n"
-        "описание | цена\n"
-        "Например:\n"
-        "Сделать проект по математике | 3000"
+        f"Ты хочешь разместить заказ:\n\n{update.message.text}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return
+    return CONFIRM_ORDER
 
-async def handle_neworder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global order_id_counter
-    text = update.message.text
-
-    if '|' not in text:
-        await update.message.reply_text("Неправильный формат. Используйте 'описание | цена'")
-        return
-
-    description, price_str = map(str.strip, text.split('|', 1))
-
-    if not price_str.isdigit():
-        await update.message.reply_text("Цена должна быть числом.")
-        return
-
+async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     order = {
-        "id": order_id_counter,
-        "author_id": update.message.from_user.id,
-        "description": description,
-        "price": int(price_str),
-        "executor_id": None,
-        "status": "open"  # open, taken, paid
+        "user_id": query.from_user.id,
+        "username": query.from_user.username,
+        "description": context.user_data.get("order_text")
     }
     orders.append(order)
-    await update.message.reply_text(f"Заказ создан с ID {order_id_counter}.")
-    order_id_counter += 1
+    await query.edit_message_text("✅ Заказ размещён! Ожидай откликов.")
+    return ConversationHandler.END
 
+async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text("❌ Заказ отменён.")
+    return ConversationHandler.END
+
+# Команда для исполнителей
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    open_orders = [o for o in orders if o['status'] == 'open']
-    if not open_orders:
-        await update.message.reply_text("Нет доступных заказов.")
+    if not orders:
+        await update.message.reply_text("Пока нет заказов.")
         return
-    msg = "Доступные заказы:\n"
-    for o in open_orders:
-        msg += f"\nID: {o['id']}\nОписание: {o['description']}\nЦена: {o['price']} тенге\n"
-    msg += "\nЧтобы взять заказ, используй команду: /takeorder <ID>"
-    await update.message.reply_text(msg)
 
-async def take_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1 or not context.args[0].isdigit():
-        await update.message.reply_text("Используй: /takeorder <ID>")
-        return
-    order_id = int(context.args[0])
-    user_id = update.message.from_user.id
-    for order in orders:
-        if order['id'] == order_id:
-            if order['status'] != 'open':
-                await update.message.reply_text("Этот заказ уже взят или оплачен.")
-                return
-            if order['author_id'] == user_id:
-                await update.message.reply_text("Ты не можешь взять свой же заказ.")
-                return
-            order['executor_id'] = user_id
-            order['status'] = 'taken'
-            await update.message.reply_text(f"Ты взял заказ ID {order_id} в работу.")
-            return
-    await update.message.reply_text("Заказ с таким ID не найден.")
-
-async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user_orders = [o for o in orders if o['author_id'] == user_id]
-    if not user_orders:
-        await update.message.reply_text("У тебя нет заказов.")
-        return
-    msg = "Твои заказы:\n"
-    for o in user_orders:
-        status = o['status']
-        executor = o['executor_id'] if o['executor_id'] else "нет"
+    msg = "📋 Активные заказы:\n\n"
+    for i, order in enumerate(orders, start=1):
         msg += (
-            f"\nID: {o['id']}\nОписание: {o['description']}\nЦена: {o['price']} тенге\n"
-            f"Исполнитель: {executor}\nСтатус: {status}\n"
+            f"{i}. {order['description']}\n"
+            f"— @{order['username']} (ID: {order['user_id']})\n\n"
         )
     await update.message.reply_text(msg)
 
-async def pay_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1 or not context.args[0].isdigit():
-        await update.message.reply_text("Используй: /payorder <ID>")
-        return
-    order_id = int(context.args[0])
-    user_id = update.message.from_user.id
-    for order in orders:
-        if order['id'] == order_id:
-            if order['author_id'] != user_id:
-                await update.message.reply_text("Ты не можешь оплачивать чужие заказы.")
-                return
-            if order['status'] != 'taken':
-                await update.message.reply_text("Заказ не взят в работу или уже оплачен.")
-                return
-            order['status'] = 'paid'
-            await update.message.reply_text(f"Заказ ID {order_id} оплачен. Спасибо!")
-            return
-    await update.message.reply_text("Заказ с таким ID не найден.")
+# Команда /cancel
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Операция отменена.")
+    return ConversationHandler.END
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Неизвестная команда. Используй /start чтобы увидеть команды.")
-
+# Главная функция
 def main():
-    TOKEN = os.getenv("7641233572:AAE-Zc5luR1OmPZuEAJ1okElewpkUXEVJ4c")
-    app = ApplicationBuilder().token("7641233572:AAE-Zc5luR1OmPZuEAJ1okElewpkUXEVJ4c").build()
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    # Хэндлер для размещения заказа
+    order_conv = ConversationHandler(
+        entry_points=[CommandHandler("order", order_start)],
+        states={
+            ASK_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_order)],
+            CONFIRM_ORDER: [CallbackQueryHandler(confirm_order, pattern="confirm_order"),
+                            CallbackQueryHandler(cancel_order, pattern="cancel_order")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("neworder", neworder))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_neworder))
-    app.add_handler(CommandHandler("orders", list_orders))
-    app.add_handler(CommandHandler("takeorder", take_order))
-    app.add_handler(CommandHandler("myorders", my_orders))
-    app.add_handler(CommandHandler("payorder", pay_order))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+    app.add_handler(order_conv)
+    app.add_handler(CommandHandler("tasks", list_orders))
+    app.add_handler(CommandHandler("cancel", cancel))
 
     app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
